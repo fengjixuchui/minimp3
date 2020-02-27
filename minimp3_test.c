@@ -1,3 +1,37 @@
+#ifdef MINIMP3_TEST
+static int malloc_num = 0, fail_malloc_num = -1;
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+static void *local_malloc(size_t size)
+{
+    /*printf("%d malloc(%d)\n", malloc_num, (int)size);*/
+    if (fail_malloc_num == malloc_num)
+        return 0;
+    malloc_num++;
+    return malloc(size);
+}
+#define malloc local_malloc
+void *local_realloc(void *ptr, size_t new_size)
+{
+    /*printf("%d realloc(%d)\n", malloc_num, (int)new_size);*/
+    if (fail_malloc_num == malloc_num)
+        return 0;
+    malloc_num++;
+    return realloc(ptr, new_size);
+}
+#define realloc local_realloc
+void *local_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
+{
+    /*printf("%d mmap(%d)\n", malloc_num, (int)length);*/
+    if (fail_malloc_num == malloc_num)
+        return MAP_FAILED;
+    malloc_num++;
+    return mmap(addr, length, prot, flags, fd, offset);
+}
+#define mmap local_mmap
+#endif
+
 /*#define MINIMP3_ONLY_MP3*/
 /*#define MINIMP3_ONLY_SIMD*/
 /*#define MINIMP3_NONSTANDARD_BUT_LOGICAL*/
@@ -63,8 +97,13 @@ static unsigned char *preload(FILE *file, int *data_size)
     if (fseek(file, 0, SEEK_SET))
         return 0;
     data = (unsigned char*)malloc(*data_size);
-    if (!data)
-        return 0;
+#define FAIL_MEM(data) \
+    if (!(data)) \
+    { \
+        printf("error: not enough memory\n"); \
+        exit(1); \
+    }
+    FAIL_MEM(data);
     if ((int)fread(data, 1, *data_size, file) != *data_size)
         exit(1);
     return data;
@@ -76,18 +115,16 @@ static int wave_out = 0, mode = 0, position = 0, portion = 0, seek_to_byte = 0;
 static size_t read_cb(void *buf, size_t size, void *user_data)
 {
     /*printf("%d read_cb(%d)\n", io_num, (int)size);*/
-    if (fail_io_num == io_num)
+    if (fail_io_num == io_num++)
         return -1;
-    io_num++;
     return fread(buf, 1, size, (FILE*)user_data);
 }
 
 static int seek_cb(uint64_t position, void *user_data)
 {
     /*printf("%d seek_cb(%d)\n", io_num, (int)position);*/
-    if (fail_io_num == io_num)
+    if (fail_io_num == io_num++)
         return -1;
-    io_num++;
     return fseek((FILE*)user_data, position, SEEK_SET);
 }
 
@@ -114,7 +151,10 @@ static int frames_iterate_cb(void *user_data, const uint8_t *frame, int frame_si
             d->allocated = 1024*1024;
         else
             d->allocated *= 2;
-        d->info->buffer = realloc(d->info->buffer, d->allocated);
+        mp3d_sample_t *alloc_buf = realloc(d->info->buffer, d->allocated);
+        if (!alloc_buf)
+            return MP3D_E_MEMORY;
+        d->info->buffer = alloc_buf;
     }
     int samples = mp3dec_decode_frame(d->mp3d, frame, frame_size, d->info->buffer + d->info->samples, info);
     if (samples)
@@ -159,6 +199,7 @@ static void decode_file(const char *input_file_name, const unsigned char *buf_re
     } else if (MODE_LOAD_CB == mode)
     {
         uint8_t *io_buf = malloc(MINIMP3_IO_SIZE);
+        FAIL_MEM(io_buf);
         FILE *file = fopen(input_file_name, "rb");
         io.read_data = io.seek_data = file;
         res = file ? mp3dec_load_cb(&mp3d, &io, io_buf, MINIMP3_IO_SIZE, &info, 0, 0) : MP3D_E_IOERROR;
@@ -182,6 +223,7 @@ static void decode_file(const char *input_file_name, const unsigned char *buf_re
     } else if (MODE_ITERATE_CB == mode)
     {
         uint8_t *io_buf = malloc(MINIMP3_IO_SIZE);
+        FAIL_MEM(io_buf);
         FILE *file = fopen(input_file_name, "rb");
         io.read_data = io.seek_data = file;
         frames_iterate_data d = { &mp3d, &info, 0 };
@@ -217,6 +259,7 @@ static void decode_file(const char *input_file_name, const unsigned char *buf_re
         }
         info.samples = dec.samples;
         info.buffer  = malloc(dec.samples*sizeof(mp3d_sample_t));
+        FAIL_MEM(info.buffer);
         info.hz      = dec.info.hz;
         info.layer   = dec.info.layer;
         info.channels = dec.info.channels;
@@ -229,7 +272,7 @@ static void decode_file(const char *input_file_name, const unsigned char *buf_re
 #else
             srand(time(0));
 #endif
-            position = info.samples > 200 ? (uint64_t)(info.samples - 200)*rand()/RAND_MAX : 0;
+            position = info.samples > 500 ? (uint64_t)(info.samples - 500)*rand()/RAND_MAX : 0;
             printf("info: seek to %d/%d\n", position, (int)info.samples);
         }
         if (position)
@@ -261,7 +304,7 @@ static void decode_file(const char *input_file_name, const unsigned char *buf_re
         while (samples)
         {
             int to_read = MINIMP3_MIN(samples, portion);
-            readed = mp3dec_ex_read(&dec, info.buffer + samples_readed, to_read);
+            readed = mp3dec_ex_read(&dec, info.buffer + samples_readed, portion);
             samples -= readed;
             samples_readed += readed;
             if (readed != (size_t)to_read)
@@ -299,6 +342,7 @@ static void decode_file(const char *input_file_name, const unsigned char *buf_re
     }
 #ifdef MINIMP3_FLOAT_OUTPUT
     int16_t *buffer = malloc(info.samples*sizeof(int16_t));
+    FAIL_MEM(buffer);
     mp3dec_f32_to_s16(info.buffer, buffer, info.samples);
     free(info.buffer);
 #else
@@ -457,7 +501,9 @@ static int self_test(const char *input_file_name)
     memset(&mp3d, 0xff, sizeof(mp3d));
     memset(&finfo, 0xff, sizeof(finfo));
     ret = mp3dec_load(&mp3d, input_file_name, &finfo, progress_cb, 0);
-    ASSERT(MP3D_E_USER == ret && 2304 == finfo.samples);
+    ASSERT(MP3D_E_USER == ret && 2304 == finfo.samples && 44100 == finfo.hz && 2 == finfo.channels && 3 == finfo.layer);
+    ASSERT(NULL != finfo.buffer);
+    free(finfo.buffer);
 
     ret = mp3dec_iterate(0, frames_iterate_cb, 0);
     ASSERT(MP3D_E_PARAM == ret);
@@ -474,6 +520,30 @@ static int self_test(const char *input_file_name)
     ASSERT(MP3D_E_PARAM == ret);
     ret = mp3dec_ex_open(&dec, "not_foud", MP3D_SEEK_TO_SAMPLE);
     ASSERT(MP3D_E_IOERROR == ret);
+
+    file = fopen(input_file_name, "rb");
+    io.read = read_cb;
+    io.seek = seek_cb;
+    io.read_data = io.seek_data = file;
+
+    ret = mp3dec_ex_open_cb(&dec, &io, MP3D_SEEK_TO_SAMPLE);
+    ASSERT(0 == ret);
+    ASSERT(5 == io_num);
+    fail_io_num = 5;
+    mp3d_sample_t sample;
+    size_t readed = mp3dec_ex_read(&dec, &sample, 1);
+    ASSERT(0 == readed);
+    ASSERT(MP3D_E_IOERROR == dec.last_error);
+    readed = mp3dec_ex_read(&dec, &sample, 1);
+    ASSERT(0 == readed);
+    ASSERT(MP3D_E_IOERROR == dec.last_error); /* stays in error state */
+    ret = mp3dec_ex_seek(&dec, 0);
+    ASSERT(0 == ret);
+    ASSERT(0 == dec.last_error); /* error state reset */
+    readed = mp3dec_ex_read(&dec, &sample, 1);
+    ASSERT(1 == readed);
+    mp3dec_ex_close(&dec);
+    fclose((FILE*)io.read_data);
 
     printf("passed\n");
     return 0;
@@ -505,6 +575,9 @@ int main(int argc, char *argv[])
         case 's': i++; if (i < argc) position = atoi(argv[i]); break;
         case 'p': i++; if (i < argc) portion  = atoi(argv[i]); break;
         case 'e': i++; if (i < argc) fail_io_num = atoi(argv[i]); break;
+#ifdef MINIMP3_TEST
+        case 'f': i++; if (i < argc) fail_malloc_num = atoi(argv[i]); break;
+#endif
         case 'b': seek_to_byte = 1; break;
         case 't': do_self_test = 1; break;
         default:

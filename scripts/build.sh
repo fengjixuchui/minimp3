@@ -34,6 +34,7 @@ set +e
 [[ "$(./minimp3)" != "error: no file names given" ]] && echo fail && exit 1 || echo pass
 [[ "$(./minimp3 do_not_exist)" != "error: read function failed, code=-3" ]] && echo fail && exit 1 || echo pass
 [[ "$(./minimp3 -z)" != "error: unrecognized option" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m -1 vectors/l3-sin1k0db.bit)" != "error: unknown mode" ]] && echo fail && exit 1 || echo pass
 [[ ! "$(./minimp3 vectors/l3-nonstandard-id3v1.bit vectors/ILL2_mono.pcm)" =~ "rate=48000 samples=1152 max_diff=17637 PSNR=15" ]] && echo fail && exit 1 || echo pass
 [[ "$(./minimp3 vectors/l3-nonstandard-id3v1.bit - temp.pcm)" != "rate=48000 samples=1152 max_diff=0 PSNR=99.000000" ]] && echo fail && exit 1 || echo pass
 rm temp.pcm
@@ -53,7 +54,15 @@ rm temp.pcm
 [[ "$(./minimp3 -m 8 -e 2 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_open()=-3 failed" ]] && echo fail && exit 1 || echo pass
 [[ "$(./minimp3 -m 8 -e 3 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_open()=-3 failed" ]] && echo fail && exit 1 || echo pass
 [[ "$(./minimp3 -m 8 -e 4 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_open()=-3 failed" ]] && echo fail && exit 1 || echo pass
-[[ "$(./minimp3 -m 8 -e 5 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_read() readed less than expected, last_error=-5" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 8 -e 5 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_read() readed less than expected, last_error=-3" ]] && echo fail && exit 1 || echo pass
+
+[[ "$(./minimp3 -m 8 -s 2304 -e 5 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_seek()=-3 failed" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 8 -s 2304 -e 6 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_seek()=-3 failed" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 8 -s 2304 -e 7 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_seek()=-3 failed" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 8 -s 2304 -e 8 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_seek()=-3 failed" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 8 -s 2304 -e 9 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_seek()=-3 failed" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 8 -s 2304 -e 12 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_seek()=-3 failed" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 8 -s 2304 -e 4 vectors/l3-nonstandard-sin1k0db_lame_vbrtag.bit)" != "error: mp3dec_ex_seek()=-3 failed" ]] && echo fail && exit 1 || echo pass
 
 [[ "$(./minimp3 vectors/l3-nonstandard-id3v2-only.bit vectors/l3-nonstandard-id3v2-only.pcm)" != "rate=0 samples=0 max_diff=0 PSNR=99.000000" ]] && echo fail && exit 1 || echo pass
 [[ "$(./minimp3 -m 3 vectors/l3-nonstandard-id3v2-only.bit vectors/l3-nonstandard-id3v2-only.pcm)" != "rate=0 samples=0 max_diff=0 PSNR=99.000000" ]] && echo fail && exit 1 || echo pass
@@ -63,6 +72,28 @@ rm temp.pcm
 
 [[ "$(./minimp3 -m 6 -s 215 -b vectors/l3-sin1k0db.bit -)" != "rate=44100 samples=725760 max_diff=0 PSNR=99.000000" ]] && echo fail && exit 1 || echo pass
 [[ "$(./minimp3 -m 6 -s 633 -b vectors/l3-sin1k0db.bit -)" != "rate=44100 samples=723456 max_diff=0 PSNR=99.000000" ]] && echo fail && exit 1 || echo pass
+
+[[ "$(./minimp3 -f 0 vectors/l3-sin1k0db.bit vectors/l3-sin1k0db.pcm)" != "error: not enough memory" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -f 1 vectors/l3-sin1k0db.bit vectors/l3-sin1k0db.pcm)" != "error: read function failed, code=-3" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -f 2 vectors/l3-sin1k0db.bit vectors/l3-sin1k0db.pcm)" != "error: read function failed, code=-2" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -f 3 vectors/l3-sin1k0db.bit vectors/l3-sin1k0db.pcm)" != "error: read function failed, code=-2" ]] && echo fail && exit 1 || echo pass
+
+[[ "$(./minimp3 -m 2 -f 0 vectors/l3-sin1k0db.bit)" != "error: not enough memory" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 2 -f 1 vectors/l3-sin1k0db.bit)" != "error: read function failed, code=-2" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 2 -f 2 vectors/l3-sin1k0db.bit)" != "error: read function failed, code=-2" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 2 -f 3 vectors/l3-sin1k0db.bit)" != "error: read function failed, code=-2" ]] && echo fail && exit 1 || echo pass
+
+[[ "$(./minimp3 -m 3 -f 1 vectors/l3-sin1k0db.bit)" != "error: read function failed, code=-2" ]] && echo fail && exit 1 || echo pass
+
+[[ "$(./minimp3 -m 6 -f 1 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_open()=-2 failed" ]] && echo fail && exit 1 || echo pass
+
+[[ "$(./minimp3 -m 8 -f 0 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_open()=-2 failed" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 8 -f 1 vectors/l3-sin1k0db.bit)" != "error: mp3dec_ex_open()=-2 failed" ]] && echo fail && exit 1 || echo pass
+
+[[ "$(./minimp3 -m 8 -s 1 vectors/l3-nonstandard-vbrtag-only.bit)" != "error: mp3dec_ex_read() readed less than expected, last_error=0" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 8 -s 1 -e 4 vectors/l3-nonstandard-vbrtag-only.bit)" != "error: mp3dec_ex_seek()=-3 failed" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 8 -s 1 -e 5 vectors/l3-nonstandard-vbrtag-only.bit)" != "error: mp3dec_ex_seek()=-3 failed" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 6 -s 1 -f 2 vectors/l3-nonstandard-sin1k0db_lame_vbrtag.bit)" != "error: mp3dec_ex_seek()=-2 failed" ]] && echo fail && exit 1 || echo pass
 set -e
 
 ./minimp3 -m 6 -s 215 -b vectors/l3-sin1k0db.bit vectors/l3-sin1k0db.pcm
@@ -72,6 +103,8 @@ set -e
 
 ./minimp3 -m 6 -s 2304 vectors/l3-sin1k0db.bit vectors/l3-sin1k0db.pcm
 ./minimp3 -m 8 -s 2304 vectors/l3-sin1k0db.bit vectors/l3-sin1k0db.pcm
+./minimp3 -m 8 -p 2000 vectors/l3-nonstandard-sin1k0db_lame_vbrtag.bit vectors/l3-nonstandard-sin1k0db_lame_vbrtag.pcm
+./minimp3 -m 8 -p 725759 vectors/l3-nonstandard-sin1k0db_lame_vbrtag.bit vectors/l3-nonstandard-sin1k0db_lame_vbrtag.pcm
 
 ./minimp3 -t vectors/l3-sin1k0db.bit
 
