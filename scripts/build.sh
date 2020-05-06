@@ -30,6 +30,9 @@ scripts/test_mode.sh 8 -1 -1
 scripts/test_mode.sh 6 -2 -1
 scripts/test_mode.sh 7 -2 -1
 scripts/test_mode.sh 8 -2 -1
+scripts/test_mode.sh 9 0 0
+scripts/test_mode.sh 10 0 0
+scripts/test_mode.sh 11 0 0
 set +e
 [[ "$(./minimp3)" != "error: no file names given" ]] && echo fail && exit 1 || echo pass
 [[ "$(./minimp3 do_not_exist)" != "error: read function failed, code=-3" ]] && echo fail && exit 1 || echo pass
@@ -94,6 +97,17 @@ rm temp.pcm
 [[ "$(./minimp3 -m 8 -s 1 -e 4 vectors/l3-nonstandard-vbrtag-only.bit)" != "error: mp3dec_ex_seek()=-3 failed" ]] && echo fail && exit 1 || echo pass
 [[ "$(./minimp3 -m 8 -s 1 -e 5 vectors/l3-nonstandard-vbrtag-only.bit)" != "error: mp3dec_ex_seek()=-3 failed" ]] && echo fail && exit 1 || echo pass
 [[ "$(./minimp3 -m 6 -s 1 -f 2 vectors/l3-nonstandard-sin1k0db_lame_vbrtag.bit)" != "error: mp3dec_ex_seek()=-2 failed" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 vectors/l3-nonstandard-vbrtag-empty.bit)" != "rate=0 samples=0 max_diff=0 PSNR=99.000000" ]] && echo fail && exit 1 || echo pass
+# Currently vbrtag with no frames flag treated as no vbrtag, not sure if any software produce such files.
+# Delay and padding usage can be implemented if such software/files exists.
+[[ "$(./minimp3 vectors/l3-nonstandard-vbrtag-noframes.bit)" != "rate=44100 samples=0 max_diff=0 PSNR=99.000000" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 6 vectors/l3-nonstandard-vbrtag-noframes.bit)" != "rate=44100 samples=0 max_diff=0 PSNR=99.000000" ]] && echo fail && exit 1 || echo pass
+
+[[ "$(./minimp3 -m 9 vectors/l3-sin1k0db.pcm)" != "info: not an mp3/mpa file" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 9 vectors/l3-nonstandard-small.bit)" != "info: not an mp3/mpa file" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 11 -e 0 vectors/l3-sin1k0db.bit)" != "error: mp3dec_detect*()=-3 failed" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 11 -e 1 vectors/l3-sin1k0db.bit)" != "error: mp3dec_detect*()=-3 failed" ]] && echo fail && exit 1 || echo pass
+[[ "$(./minimp3 -m 11 -e 2 vectors/l3-sin1k0db.bit)" != "error: mp3dec_detect*()=-3 failed" ]] && echo fail && exit 1 || echo pass
 set -e
 
 ./minimp3 -m 6 -s 215 -b vectors/l3-sin1k0db.bit vectors/l3-sin1k0db.pcm

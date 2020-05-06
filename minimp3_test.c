@@ -57,6 +57,9 @@ void *local_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t o
 #define MODE_STREAM     6
 #define MODE_STREAM_BUF 7
 #define MODE_STREAM_CB  8
+#define MODE_DETECT     9
+#define MODE_DETECT_BUF 10
+#define MODE_DETECT_CB  11
 
 static int16_t read16le(const void *p)
 {
@@ -178,6 +181,7 @@ static void decode_file(const char *input_file_name, const unsigned char *buf_re
     mp3dec_t mp3d;
     int i, res = -1, data_bytes, total_samples = 0, maxdiff = 0;
     int no_std_vec = strstr(input_file_name, "nonstandard") || strstr(input_file_name, "ILL");
+    uint8_t *buf = 0;
     double MSE = 0.0, psnr;
 
     mp3dec_io_t io;
@@ -235,7 +239,6 @@ static void decode_file(const char *input_file_name, const unsigned char *buf_re
     {
         mp3dec_ex_t dec;
         size_t readed;
-        uint8_t *buf = 0;
         if (MODE_STREAM == mode)
         {
             res = mp3dec_ex_open(&dec, input_file_name, seek_to_byte ? MP3D_SEEK_TO_BYTE : MP3D_SEEK_TO_SAMPLE);
@@ -330,6 +333,38 @@ static void decode_file(const char *input_file_name, const unsigned char *buf_re
             free(buf);
         if (MODE_STREAM_CB == mode)
             fclose((FILE*)io.read_data);
+    } else if (MODE_DETECT == mode || MODE_DETECT_BUF == mode || MODE_DETECT_CB == mode)
+    {
+        if (MODE_DETECT == mode)
+        {
+            res = mp3dec_detect(input_file_name);
+        } else if (MODE_DETECT_BUF == mode)
+        {
+            int size = 0;
+            FILE *file = fopen(input_file_name, "rb");
+            buf = preload(file, &size);
+            fclose(file);
+            res = buf ? mp3dec_detect_buf(buf, size) : MP3D_E_IOERROR;
+        } else if (MODE_DETECT_CB == mode)
+        {
+            uint8_t *io_buf = malloc(MINIMP3_BUF_SIZE);
+            FAIL_MEM(io_buf);
+            FILE *file = fopen(input_file_name, "rb");
+            io.read_data = io.seek_data = file;
+            res = file ? mp3dec_detect_cb(&io, io_buf, MINIMP3_BUF_SIZE) : MP3D_E_IOERROR;
+            free(io_buf);
+        }
+        if (MP3D_E_USER == res)
+        {
+            printf("info: not an mp3/mpa file\n");
+            exit(1);
+        } else if (res)
+        {
+            printf("error: mp3dec_detect*()=%d failed\n", res);
+            exit(1);
+        }
+        printf("info: mp3/mpa file detected\n");
+        exit(0);
     } else
     {
         printf("error: unknown mode\n");
@@ -417,6 +452,11 @@ static int self_test(const char *input_file_name)
 #define ASSERT(c) if (!(c)) { printf("failed, line=%d\n", __LINE__); exit(1); }
     ASSERT(1152 == samples);
 
+    ret = mp3dec_detect_buf(0, size);
+    ASSERT(MP3D_E_PARAM == ret);
+    ret = mp3dec_detect_buf(buf, (size_t)-1);
+    ASSERT(MP3D_E_PARAM == ret);
+
     ret = mp3dec_load_buf(0, buf, size, &finfo, 0, 0);
     ASSERT(MP3D_E_PARAM == ret);
     ret = mp3dec_load_buf(&mp3d, 0, size, &finfo, 0, 0);
@@ -429,6 +469,11 @@ static int self_test(const char *input_file_name)
     memset(&finfo, 0xff, sizeof(finfo));
     ret = mp3dec_load_buf(&mp3d, buf, 0, &finfo, 0, 0);
     ASSERT(0 == ret && 0 == finfo.samples);
+
+    ret = mp3dec_detect_cb(&io, 0, size);
+    ASSERT(MP3D_E_PARAM == ret);
+    ret = mp3dec_detect_cb(&io, buf, (size_t)-1);
+    ASSERT(MP3D_E_PARAM == ret);
 
     ret = mp3dec_load_cb(0, &io, buf, size, &finfo, 0, 0);
     ASSERT(MP3D_E_PARAM == ret);
@@ -467,18 +512,19 @@ static int self_test(const char *input_file_name)
     ASSERT(MP3D_E_PARAM == ret);
     ret = mp3dec_ex_open_buf(&dec, buf, (size_t)-1, MP3D_SEEK_TO_SAMPLE);
     ASSERT(MP3D_E_PARAM == ret);
-    ret = mp3dec_ex_open_buf(&dec, buf, size, MP3D_SEEK_TO_SAMPLE + 1);
+    ret = mp3dec_ex_open_buf(&dec, buf, size, MP3D_SEEK_TO_SAMPLE | (1 << 2));
     ASSERT(MP3D_E_PARAM == ret);
     ret = mp3dec_ex_open_buf(&dec, buf, 0, MP3D_SEEK_TO_SAMPLE);
     ASSERT(0 == ret);
     ret = mp3dec_ex_read(&dec, (mp3d_sample_t*)buf, 10);
     ASSERT(0 == ret);
+    mp3dec_ex_close(&dec);
 
     ret = mp3dec_ex_open_cb(0, &io, MP3D_SEEK_TO_SAMPLE);
     ASSERT(MP3D_E_PARAM == ret);
     ret = mp3dec_ex_open_cb(&dec, 0, MP3D_SEEK_TO_SAMPLE);
     ASSERT(MP3D_E_PARAM == ret);
-    ret = mp3dec_ex_open_cb(&dec, &io, MP3D_SEEK_TO_SAMPLE + 1);
+    ret = mp3dec_ex_open_cb(&dec, &io, MP3D_SEEK_TO_SAMPLE | (1 << 2));
     ASSERT(MP3D_E_PARAM == ret);
 
     ret = mp3dec_ex_seek(0, 0);
@@ -516,7 +562,7 @@ static int self_test(const char *input_file_name)
     ASSERT(MP3D_E_PARAM == ret);
     ret = mp3dec_ex_open(&dec, 0, MP3D_SEEK_TO_SAMPLE);
     ASSERT(MP3D_E_PARAM == ret);
-    ret = mp3dec_ex_open(&dec, input_file_name, MP3D_SEEK_TO_SAMPLE + 1);
+    ret = mp3dec_ex_open(&dec, input_file_name, MP3D_SEEK_TO_SAMPLE | (1 << 2));
     ASSERT(MP3D_E_PARAM == ret);
     ret = mp3dec_ex_open(&dec, "not_foud", MP3D_SEEK_TO_SAMPLE);
     ASSERT(MP3D_E_IOERROR == ret);
@@ -529,6 +575,7 @@ static int self_test(const char *input_file_name)
     ret = mp3dec_ex_open_cb(&dec, &io, MP3D_SEEK_TO_SAMPLE);
     ASSERT(0 == ret);
     ASSERT(5 == io_num);
+    ASSERT(725760 == dec.samples); /* num samples detected */
     fail_io_num = 5;
     mp3d_sample_t sample;
     size_t readed = mp3dec_ex_read(&dec, &sample, 1);
@@ -543,8 +590,15 @@ static int self_test(const char *input_file_name)
     readed = mp3dec_ex_read(&dec, &sample, 1);
     ASSERT(1 == readed);
     mp3dec_ex_close(&dec);
-    fclose((FILE*)io.read_data);
 
+    ret = mp3dec_ex_open_cb(&dec, &io, MP3D_SEEK_TO_SAMPLE | MP3D_DO_NOT_SCAN);
+    ASSERT(0 == ret);
+    ASSERT(0 == dec.samples); /* num samples do not detected because of MP3D_DO_NOT_SCAN */
+    readed = mp3dec_ex_read(&dec, &sample, 1);
+    ASSERT(1 == readed);
+    mp3dec_ex_close(&dec);
+
+    fclose((FILE*)io.read_data);
     printf("passed\n");
     return 0;
 }

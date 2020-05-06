@@ -8,15 +8,19 @@
 */
 #include "minimp3.h"
 
-#define MP3D_SEEK_TO_BYTE   0
-#define MP3D_SEEK_TO_SAMPLE 1
+/* flags for mp3dec_ex_open_* functions */
+#define MP3D_SEEK_TO_BYTE   0      /* mp3dec_ex_seek seeks to byte in stream */
+#define MP3D_SEEK_TO_SAMPLE 1      /* mp3dec_ex_seek precisely seeks to sample using index (created during duration calculation scan or when mp3dec_ex_seek called) */
+#define MP3D_DO_NOT_SCAN    2      /* do not scan whole stream for duration if vbrtag not found, mp3dec_ex_t::samples will be filled only if mp3dec_ex_t::vbr_tag_found == 1 */
 
+/* compile-time config */
 #define MINIMP3_PREDECODE_FRAMES 2 /* frames to pre-decode and skip after seek (to fill internal structures) */
 /*#define MINIMP3_SEEK_IDX_LINEAR_SEARCH*/ /* define to use linear index search instead of binary search on seek */
 #define MINIMP3_IO_SIZE (128*1024) /* io buffer size for streaming functions, must be greater than MINIMP3_BUF_SIZE */
 #define MINIMP3_BUF_SIZE (16*1024) /* buffer which can hold minimum 10 consecutive mp3 frames (~16KB) worst case */
-#define MINIMP3_ENABLE_RING 0      /* enable hardware magic ring buffer if available, to make less input buffer memmove(s) in callback IO mode */
+#define MINIMP3_ENABLE_RING 0      /* WIP enable hardware magic ring buffer if available, to make less input buffer memmove(s) in callback IO mode */
 
+/* return error codes */
 #define MP3D_E_PARAM   -1
 #define MP3D_E_MEMORY  -2
 #define MP3D_E_IOERROR -3
@@ -69,7 +73,7 @@ typedef struct
     mp3dec_frame_info_t info;
     mp3d_sample_t buffer[MINIMP3_MAX_SAMPLES_PER_FRAME];
     size_t input_consumed, input_filled;
-    int is_file, seek_method, vbr_tag_found;
+    int is_file, flags, vbr_tag_found, indexes_built;
     int free_format_bytes;
     int buffer_samples, buffer_consumed, to_skip, start_delay;
     int last_error;
@@ -82,6 +86,9 @@ typedef int (*MP3D_PROGRESS_CB)(void *user_data, size_t file_size, uint64_t offs
 extern "C" {
 #endif
 
+/* detect mp3/mpa format */
+int mp3dec_detect_buf(const uint8_t *buf, size_t buf_size);
+int mp3dec_detect_cb(mp3dec_io_t *io, uint8_t *buf, size_t buf_size);
 /* decode whole buffer block */
 int mp3dec_load_buf(mp3dec_t *dec, const uint8_t *buf, size_t buf_size, mp3dec_file_info_t *info, MP3D_PROGRESS_CB progress_cb, void *user_data);
 int mp3dec_load_cb(mp3dec_t *dec, mp3dec_io_t *io, uint8_t *buf, size_t buf_size, mp3dec_file_info_t *info, MP3D_PROGRESS_CB progress_cb, void *user_data);
@@ -89,20 +96,22 @@ int mp3dec_load_cb(mp3dec_t *dec, mp3dec_io_t *io, uint8_t *buf, size_t buf_size
 int mp3dec_iterate_buf(const uint8_t *buf, size_t buf_size, MP3D_ITERATE_CB callback, void *user_data);
 int mp3dec_iterate_cb(mp3dec_io_t *io, uint8_t *buf, size_t buf_size, MP3D_ITERATE_CB callback, void *user_data);
 /* streaming decoder with seeking capability */
-int mp3dec_ex_open_buf(mp3dec_ex_t *dec, const uint8_t *buf, size_t buf_size, int seek_method);
-int mp3dec_ex_open_cb(mp3dec_ex_t *dec, mp3dec_io_t *io, int seek_method);
+int mp3dec_ex_open_buf(mp3dec_ex_t *dec, const uint8_t *buf, size_t buf_size, int flags);
+int mp3dec_ex_open_cb(mp3dec_ex_t *dec, mp3dec_io_t *io, int flags);
 void mp3dec_ex_close(mp3dec_ex_t *dec);
 int mp3dec_ex_seek(mp3dec_ex_t *dec, uint64_t position);
 size_t mp3dec_ex_read(mp3dec_ex_t *dec, mp3d_sample_t *buf, size_t samples);
 #ifndef MINIMP3_NO_STDIO
-/* stdio versions of file load, iterate and stream */
+/* stdio versions of file detect, load, iterate and stream */
+int mp3dec_detect(const char *file_name);
 int mp3dec_load(mp3dec_t *dec, const char *file_name, mp3dec_file_info_t *info, MP3D_PROGRESS_CB progress_cb, void *user_data);
 int mp3dec_iterate(const char *file_name, MP3D_ITERATE_CB callback, void *user_data);
-int mp3dec_ex_open(mp3dec_ex_t *dec, const char *file_name, int seek_method);
+int mp3dec_ex_open(mp3dec_ex_t *dec, const char *file_name, int flags);
 #ifdef _WIN32
+int mp3dec_detect_w(const wchar_t *file_name);
 int mp3dec_load_w(mp3dec_t *dec, const wchar_t *file_name, mp3dec_file_info_t *info, MP3D_PROGRESS_CB progress_cb, void *user_data);
 int mp3dec_iterate_w(const wchar_t *file_name, MP3D_ITERATE_CB callback, void *user_data);
-int mp3dec_ex_open_w(mp3dec_ex_t *dec, const wchar_t *file_name, int seek_method);
+int mp3dec_ex_open_w(mp3dec_ex_t *dec, const wchar_t *file_name, int flags);
 #endif
 #endif
 
@@ -118,10 +127,10 @@ static void mp3dec_skip_id3v1(const uint8_t *buf, size_t *pbuf_size)
 {
     size_t buf_size = *pbuf_size;
 #ifndef MINIMP3_NOSKIP_ID3V1
-    if (buf_size > 128 && !memcmp(buf + buf_size - 128, "TAG", 3))
+    if (buf_size >= 128 && !memcmp(buf + buf_size - 128, "TAG", 3))
     {
         buf_size -= 128;
-        if (buf_size > 227 && !memcmp(buf + buf_size - 227, "TAG+", 4))
+        if (buf_size >= 227 && !memcmp(buf + buf_size - 227, "TAG+", 4))
             buf_size -= 227;
     }
 #endif
@@ -129,6 +138,10 @@ static void mp3dec_skip_id3v1(const uint8_t *buf, size_t *pbuf_size)
     if (buf_size > 32 && !memcmp(buf + buf_size - 32, "APETAGEX", 8))
     {
         buf_size -= 32;
+        const uint8_t *tag = buf + buf_size + 8 + 4;
+        uint32_t tag_size = (uint32_t)(tag[3] << 24) | (tag[2] << 16) | (tag[1] << 8) | tag[0];
+        if (buf_size >= tag_size)
+            buf_size -= tag_size;
     }
 #endif
     *pbuf_size = buf_size;
@@ -191,7 +204,7 @@ static int mp3dec_check_vbrtag(const uint8_t *frame, int frame_size, uint32_t *f
         return 0;
     int flags = tag[7];
     if (!((flags & FRAMES_FLAG)))
-        return 0;
+        return -1;
     tag += 8;
     *frames = (uint32_t)(tag[0] << 24) | (tag[1] << 16) | (tag[2] << 8) | tag[3];
     tag += 4;
@@ -211,6 +224,49 @@ static int mp3dec_check_vbrtag(const uint8_t *frame, int frame_size, uint32_t *f
         *padding = (((tag[1] & 0xF) << 8) | tag[2]) - (528 + 1);
     }
     return 1;
+}
+
+int mp3dec_detect_buf(const uint8_t *buf, size_t buf_size)
+{
+    return mp3dec_detect_cb(0, (uint8_t *)buf, buf_size);
+}
+
+int mp3dec_detect_cb(mp3dec_io_t *io, uint8_t *buf, size_t buf_size)
+{
+    if (!buf || (size_t)-1 == buf_size || (io && buf_size < MINIMP3_BUF_SIZE))
+        return MP3D_E_PARAM;
+    size_t filled = buf_size;
+    if (io)
+    {
+        if (io->seek(0, io->seek_data))
+            return MP3D_E_IOERROR;
+        filled = io->read(buf, MINIMP3_ID3_DETECT_SIZE, io->read_data);
+        if (filled > MINIMP3_ID3_DETECT_SIZE)
+            return MP3D_E_IOERROR;
+    }
+    if (filled < MINIMP3_ID3_DETECT_SIZE)
+        return MP3D_E_USER; /* too small, can't be mp3/mpa */
+    if (mp3dec_skip_id3v2(buf, filled))
+        return 0; /* id3v2 tag is enough evidence */
+    if (io)
+    {
+        size_t readed = io->read(buf + MINIMP3_ID3_DETECT_SIZE, buf_size - MINIMP3_ID3_DETECT_SIZE, io->read_data);
+        if (readed > (buf_size - MINIMP3_ID3_DETECT_SIZE))
+            return MP3D_E_IOERROR;
+        filled += readed;
+        if (filled < MINIMP3_BUF_SIZE)
+            mp3dec_skip_id3v1(buf, &filled);
+    } else
+    {
+        mp3dec_skip_id3v1(buf, &filled);
+        if (filled > MINIMP3_BUF_SIZE)
+            filled = MINIMP3_BUF_SIZE;
+    }
+    int free_format_bytes, frame_size;
+    mp3d_find_frame(buf, filled, &free_format_bytes, &frame_size);
+    if (frame_size)
+        return 0; /* MAX_FRAME_SYNC_MATCHES consecutive frames found */
+    return MP3D_E_USER;
 }
 
 int mp3dec_load_buf(mp3dec_t *dec, const uint8_t *buf, size_t buf_size, mp3dec_file_info_t *info, MP3D_PROGRESS_CB progress_cb, void *user_data)
@@ -308,7 +364,10 @@ int mp3dec_load_cb(mp3dec_t *dec, mp3dec_io_t *io, uint8_t *buf, size_t buf_size
         frame_info.bitrate_kbps = hdr_bitrate_kbps(hdr);
         frame_info.frame_bytes = frame_size;
         samples = hdr_frame_samples(hdr)*frame_info.channels;
-        if (mp3dec_check_vbrtag(hdr, frame_size, &frames, &delay, &padding))
+        if (3 != frame_info.layer)
+            break;
+        int ret = mp3dec_check_vbrtag(hdr, frame_size, &frames, &delay, &padding);
+        if (ret > 0)
         {
             padding *= frame_info.channels;
             to_skip = delay*frame_info.channels;
@@ -319,6 +378,9 @@ int mp3dec_load_cb(mp3dec_t *dec, mp3dec_io_t *io, uint8_t *buf, size_t buf_size
                 detected_samples -= padding;
             if (!detected_samples)
                 return 0;
+        }
+        if (ret)
+        {
             if (io)
             {
                 consumed += frame_size;
@@ -544,7 +606,7 @@ static int mp3dec_load_index(void *user_data, const uint8_t *frame, int frame_si
 {
     mp3dec_frame_t *idx_frame;
     mp3dec_ex_t *dec = (mp3dec_ex_t *)user_data;
-    if (!dec->index.frames && !dec->vbr_tag_found)
+    if (!dec->index.frames && !dec->start_offset)
     {   /* detect VBR tag and try to avoid full scan */
         uint32_t frames;
         int delay, padding;
@@ -552,21 +614,29 @@ static int mp3dec_load_index(void *user_data, const uint8_t *frame, int frame_si
         dec->start_offset = dec->offset = offset;
         dec->end_offset   = offset + buf_size;
         dec->free_format_bytes = free_format_bytes; /* should not change */
-        if (mp3dec_check_vbrtag(frame, frame_size, &frames, &delay, &padding))
+        if (3 == dec->info.layer)
         {
-            padding *= info->channels;
-            dec->start_delay = dec->to_skip = delay*info->channels;
-            dec->samples = hdr_frame_samples(frame)*info->channels*(uint64_t)frames;
-            if (dec->samples >= (uint64_t)dec->start_delay)
-                dec->samples -= dec->start_delay;
-            if (padding > 0 && dec->samples >= (uint64_t)padding)
-                dec->samples -= padding;
-            dec->detected_samples = dec->samples;
-            dec->start_offset = dec->offset = offset + frame_size;
-            dec->vbr_tag_found = 1;
-            return MP3D_E_USER;
+            int ret = mp3dec_check_vbrtag(frame, frame_size, &frames, &delay, &padding);
+            if (ret)
+                dec->start_offset = dec->offset = offset + frame_size;
+            if (ret > 0)
+            {
+                padding *= info->channels;
+                dec->start_delay = dec->to_skip = delay*info->channels;
+                dec->samples = hdr_frame_samples(frame)*info->channels*(uint64_t)frames;
+                if (dec->samples >= (uint64_t)dec->start_delay)
+                    dec->samples -= dec->start_delay;
+                if (padding > 0 && dec->samples >= (uint64_t)padding)
+                    dec->samples -= padding;
+                dec->detected_samples = dec->samples;
+                dec->vbr_tag_found = 1;
+                return MP3D_E_USER;
+            } else if (ret < 0)
+                return 0;
         }
     }
+    if (dec->flags & MP3D_DO_NOT_SCAN)
+        return MP3D_E_USER;
     if (dec->index.num_frames + 1 > dec->index.capacity)
     {
         if (!dec->index.capacity)
@@ -591,20 +661,22 @@ static int mp3dec_load_index(void *user_data, const uint8_t *frame, int frame_si
     return 0;
 }
 
-int mp3dec_ex_open_buf(mp3dec_ex_t *dec, const uint8_t *buf, size_t buf_size, int seek_method)
+int mp3dec_ex_open_buf(mp3dec_ex_t *dec, const uint8_t *buf, size_t buf_size, int flags)
 {
-    if (!dec || !buf || (size_t)-1 == buf_size || !(MP3D_SEEK_TO_BYTE == seek_method || MP3D_SEEK_TO_SAMPLE == seek_method))
+    if (!dec || !buf || (size_t)-1 == buf_size || (flags & (~3)))
         return MP3D_E_PARAM;
     memset(dec, 0, sizeof(*dec));
     dec->file.buffer = buf;
     dec->file.size   = buf_size;
-    dec->seek_method = seek_method;
+    dec->flags       = flags;
     mp3dec_init(&dec->mp3d);
     int ret = mp3dec_iterate_buf(dec->file.buffer, dec->file.size, mp3dec_load_index, dec);
     if (ret && MP3D_E_USER != ret)
         return ret;
     mp3dec_init(&dec->mp3d);
     dec->buffer_samples = 0;
+    dec->indexes_built = !(dec->vbr_tag_found || (flags & MP3D_DO_NOT_SCAN));
+    dec->flags &= (~MP3D_DO_NOT_SCAN);
     return 0;
 }
 
@@ -637,7 +709,7 @@ int mp3dec_ex_seek(mp3dec_ex_t *dec, uint64_t position)
     size_t i;
     if (!dec)
         return MP3D_E_PARAM;
-    if (MP3D_SEEK_TO_BYTE == dec->seek_method)
+    if (!(dec->flags & MP3D_SEEK_TO_SAMPLE))
     {
         if (dec->io)
         {
@@ -658,8 +730,9 @@ seek_zero:
         dec->to_skip = 0;
         goto do_exit;
     }
-    if (!dec->index.frames && dec->vbr_tag_found)
-    {   /* no index created yet (vbr tag used to calculate track length) */
+    if (!dec->indexes_built)
+    {   /* no index created yet (vbr tag used to calculate track length or MP3D_DO_NOT_SCAN open flag used) */
+        dec->indexes_built = 1;
         dec->samples = 0;
         dec->buffer_samples = 0;
         if (dec->io)
@@ -1127,6 +1200,13 @@ error:
 }
 #endif
 
+static int mp3dec_detect_mapinfo(mp3dec_map_info_t *map_info)
+{
+    int ret = mp3dec_detect_buf(map_info->buffer, map_info->size);
+    mp3dec_close_file(map_info);
+    return ret;
+}
+
 static int mp3dec_load_mapinfo(mp3dec_t *dec, mp3dec_map_info_t *map_info, mp3dec_file_info_t *info, MP3D_PROGRESS_CB progress_cb, void *user_data)
 {
     int ret = mp3dec_load_buf(dec, map_info->buffer, map_info->size, info, progress_cb, user_data);
@@ -1141,13 +1221,22 @@ static int mp3dec_iterate_mapinfo(mp3dec_map_info_t *map_info, MP3D_ITERATE_CB c
     return ret;
 }
 
-static int mp3dec_ex_open_mapinfo(mp3dec_ex_t *dec, int seek_method)
+static int mp3dec_ex_open_mapinfo(mp3dec_ex_t *dec, int flags)
 {
-    int ret = mp3dec_ex_open_buf(dec, dec->file.buffer, dec->file.size, seek_method);
+    int ret = mp3dec_ex_open_buf(dec, dec->file.buffer, dec->file.size, flags);
     dec->is_file = 1;
     if (ret)
         mp3dec_ex_close(dec);
     return ret;
+}
+
+int mp3dec_detect(const char *file_name)
+{
+    int ret;
+    mp3dec_map_info_t map_info;
+    if ((ret = mp3dec_open_file(file_name, &map_info)))
+        return ret;
+    return mp3dec_detect_mapinfo(&map_info);
 }
 
 int mp3dec_load(mp3dec_t *dec, const char *file_name, mp3dec_file_info_t *info, MP3D_PROGRESS_CB progress_cb, void *user_data)
@@ -1168,19 +1257,19 @@ int mp3dec_iterate(const char *file_name, MP3D_ITERATE_CB callback, void *user_d
     return mp3dec_iterate_mapinfo(&map_info, callback, user_data);
 }
 
-int mp3dec_ex_open(mp3dec_ex_t *dec, const char *file_name, int seek_method)
+int mp3dec_ex_open(mp3dec_ex_t *dec, const char *file_name, int flags)
 {
     int ret;
     if (!dec)
         return MP3D_E_PARAM;
     if ((ret = mp3dec_open_file(file_name, &dec->file)))
         return ret;
-    return mp3dec_ex_open_mapinfo(dec, seek_method);
+    return mp3dec_ex_open_mapinfo(dec, flags);
 }
 
-int mp3dec_ex_open_cb(mp3dec_ex_t *dec, mp3dec_io_t *io, int seek_method)
+int mp3dec_ex_open_cb(mp3dec_ex_t *dec, mp3dec_io_t *io, int flags)
 {
-    if (!dec || !io || !(MP3D_SEEK_TO_BYTE == seek_method || MP3D_SEEK_TO_SAMPLE == seek_method))
+    if (!dec || !io || (flags & (~3)))
         return MP3D_E_PARAM;
     memset(dec, 0, sizeof(*dec));
 #ifdef MINIMP3_HAVE_RING
@@ -1193,7 +1282,7 @@ int mp3dec_ex_open_cb(mp3dec_ex_t *dec, mp3dec_io_t *io, int seek_method)
     if (!dec->file.buffer)
         return MP3D_E_MEMORY;
 #endif
-    dec->seek_method = seek_method;
+    dec->flags = flags;
     dec->io = io;
     mp3dec_init(&dec->mp3d);
     if (io->seek(0, io->seek_data))
@@ -1205,6 +1294,8 @@ int mp3dec_ex_open_cb(mp3dec_ex_t *dec, mp3dec_io_t *io, int seek_method)
         return MP3D_E_IOERROR;
     mp3dec_init(&dec->mp3d);
     dec->buffer_samples = 0;
+    dec->indexes_built = !(dec->vbr_tag_found || (flags & MP3D_DO_NOT_SCAN));
+    dec->flags &= (~MP3D_DO_NOT_SCAN);
     return 0;
 }
 
@@ -1225,13 +1316,22 @@ void mp3dec_ex_close(mp3dec_ex_t *dec)
 }
 
 #ifdef _WIN32
+int mp3dec_detect_w(const wchar_t *file_name)
+{
+    int ret;
+    mp3dec_map_info_t map_info;
+    if ((ret = mp3dec_open_file_w(file_name, &map_info)))
+        return ret;
+    return mp3dec_detect_mapinfo(&map_info);
+}
+
 int mp3dec_load_w(mp3dec_t *dec, const wchar_t *file_name, mp3dec_file_info_t *info, MP3D_PROGRESS_CB progress_cb, void *user_data)
 {
     int ret;
     mp3dec_map_info_t map_info;
     if ((ret = mp3dec_open_file_w(file_name, &map_info)))
         return ret;
-    return mp3dec_load_mapinfo(dec, &map_info,info, progress_cb, user_data);
+    return mp3dec_load_mapinfo(dec, &map_info, info, progress_cb, user_data);
 }
 
 int mp3dec_iterate_w(const wchar_t *file_name, MP3D_ITERATE_CB callback, void *user_data)
@@ -1243,12 +1343,12 @@ int mp3dec_iterate_w(const wchar_t *file_name, MP3D_ITERATE_CB callback, void *u
     return mp3dec_iterate_mapinfo(&map_info, callback, user_data);
 }
 
-int mp3dec_ex_open_w(mp3dec_ex_t *dec, const wchar_t *file_name, int seek_method)
+int mp3dec_ex_open_w(mp3dec_ex_t *dec, const wchar_t *file_name, int flags)
 {
     int ret;
     if ((ret = mp3dec_open_file_w(file_name, &dec->file)))
         return ret;
-    return mp3dec_ex_open_mapinfo(dec, seek_method);
+    return mp3dec_ex_open_mapinfo(dec, flags);
 }
 #endif
 #else /* MINIMP3_NO_STDIO */
